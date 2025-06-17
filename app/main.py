@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 from langchain.docstore.document import Document
 api_token=os.getenv("api_token_huggingface")
+MAX_WEB_RESULTS = 3
 MIN_SIMILARITY_THRESHOLD = 0.25
 embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", encode_kwargs={'normalize_embeddings': True}
 )
@@ -111,14 +112,54 @@ def resultados_son_relevantes(docs: List[Document], query: str) -> bool:
     if docs[0].metadata.get('similarity_score', 0) < MIN_SIMILARITY_THRESHOLD:
         return False
     
-    # Verificar antigüedad (más de 2 años)
+    # Verificar antigüedad (más de 5 años)
     current_year = datetime.now().year
     for doc in docs:
         year_str = doc.metadata.get('publicado', '')
         if year_str and year_str.isdigit():
-            if current_year - int(year_str) <= 2:
+            if current_year - int(year_str) <= 5:
                 return True
     return False
+
+# Función para buscar en internet y extraer contenido
+def buscar_en_internet(query: str, num_results: int = MAX_WEB_RESULTS) -> List[Document]:
+    """Busca en internet y devuelve documentos procesados"""
+    documents = []
+    
+    try:
+        with DDGS() as ddgs:
+            # Realizar búsqueda en DuckDuckGo
+            resultados = list(ddgs.text(query, max_results=num_results))
+            
+            for i, r in enumerate(resultados):
+                try:
+                    # Extraer contenido de la página web
+                    response = requests.get(r['href'], timeout=10)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Extraer texto principal (párrafos)
+                    paragraphs = soup.find_all('p')
+                    content = ' '.join(p.get_text().strip() for p in paragraphs)
+                    content = content[:5000]  # Limitar tamaño
+                    
+                    # Crear documento con metadatos
+                    doc = Document(
+                        page_content=content,
+                        metadata={
+                            'titulo': r['title'],
+                            'url': r['href'],
+                            'fuente': 'web',
+                            'publicado': datetime.now().strftime("%Y"),  # Año actual
+                            'consultado_en': datetime.now().isoformat()
+                        }
+                    )
+                    documents.append(doc)
+                except Exception as e:
+                    print(f"Error extrayendo contenido de {r['href']}: {e}")
+    except Exception as e:
+        print(f"Error en búsqueda web: {e}")
+    
+    return documents
 
 # Modelos de datos
 class Query(BaseModel):
