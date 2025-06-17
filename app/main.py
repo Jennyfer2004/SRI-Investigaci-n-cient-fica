@@ -17,8 +17,12 @@ import numpy as np
 from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings  
 import os
+import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+from langchain.docstore.document import Document
 api_token=os.getenv("api_token_huggingface")
-
+MIN_SIMILARITY_THRESHOLD = 0.25
 embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", encode_kwargs={'normalize_embeddings': True}
 )
 
@@ -96,6 +100,25 @@ def load_user_db():
 def save_user_db(user_db):
     with open(USER_DB_FILE, 'w') as f:
         json.dump(user_db, f)
+
+# Función para evaluar relevancia de resultados
+def resultados_son_relevantes(docs: List[Document], query: str) -> bool:
+    """Evalúa si los resultados son relevantes y actualizados"""
+    if not docs:
+        return False
+    
+    # Verificar similitud del mejor resultado
+    if docs[0].metadata.get('similarity_score', 0) < MIN_SIMILARITY_THRESHOLD:
+        return False
+    
+    # Verificar antigüedad (más de 2 años)
+    current_year = datetime.now().year
+    for doc in docs:
+        year_str = doc.metadata.get('publicado', '')
+        if year_str and year_str.isdigit():
+            if current_year - int(year_str) <= 2:
+                return True
+    return False
 
 # Modelos de datos
 class Query(BaseModel):
