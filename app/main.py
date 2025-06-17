@@ -194,9 +194,38 @@ def responder(query: Query):
             user_db[query.user_id] = user_interactions
             save_user_db(user_db)
 
-        # Búsqueda de documentos relevantes
-        docs = vector_db.similarity_search(query.question, k=5)
-        context = "\n".join(doc.page_content for doc in docs)
+        # Búsqueda de documentos relevantes en ChromaDB
+        docs = vector_db.similarity_search_with_score(query.question, k=5)
+        
+        # Separar documentos y puntuaciones
+        doc_objects = [doc for doc, score in docs]
+        similarity_scores = [score for doc, score in docs]
+        
+        # Añadir puntuación de similitud a los metadatos
+        for i, doc in enumerate(doc_objects):
+            doc.metadata['similarity_score'] = float(similarity_scores[i])
+        
+        # Verificar si los resultados son relevantes y actualizados
+        if not resultados_son_relevantes(doc_objects, query.question):
+            print("Resultados locales insuficientes. Buscando en internet...")
+            web_docs = buscar_en_internet(query.question)
+            
+            if web_docs:
+                # Añadir nuevos documentos a la base vectorial
+                texts = [doc.page_content for doc in web_docs]
+                metadatas = [doc.metadata for doc in web_docs]
+                vector_db.add_texts(texts, metadatas)
+                
+                # Usar documentos web como contexto principal
+                doc_objects = web_docs
+                source_type = "web"
+            else:
+                source_type = "local (insuficiente)"
+        else:
+            source_type = "local"
+        
+        # Construir contexto
+        context = "\n".join(doc.page_content for doc in doc_objects)
         
         # Generar respuesta
         prompt = prompt_template.format(context=context, question=query.question)
@@ -219,13 +248,15 @@ def responder(query: Query):
         
         # Registrar los documentos consultados
         if query.user_id:
-            interaction_record["sources"] = [doc.metadata.get("doi", "") for doc in docs]
+            interaction_record["sources"] = [doc.metadata.get("url", doc.metadata.get("doi", "")) for doc in doc_objects]
+            interaction_record["source_type"] = source_type
             save_user_db(user_db)
 
         return {
             "respuesta": respuesta,
             "recomendaciones": recomendaciones,
-            "sources": [doc.metadata.get("doi", "") for doc in docs]
+            "sources": [doc.metadata.get("url", doc.metadata.get("doi", "")) for doc in doc_objects],
+            "source_type": source_type
         }
 
     except Exception as e:
