@@ -12,9 +12,6 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import json
-import os
-import numpy as np
-from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings  
 import os
 import requests
@@ -195,12 +192,10 @@ def responder(query: Query):
             save_user_db(user_db)
 
         # Búsqueda de documentos relevantes en ChromaDB
-        docs = vector_db.similarity_search_with_score(query.question, k=5)
-        
-        # Separar documentos y puntuaciones
-        doc_objects = [doc for doc, score in docs]
-        similarity_scores = [score for doc, score in docs]
-        
+        docs_with_scores = vector_db.similarity_search_with_score(query.question, k=5)
+        doc_objects = [doc for doc, score in docs_with_scores]
+        similarity_scores = [score for doc, score in docs_with_scores]
+
         # Añadir puntuación de similitud a los metadatos
         for i, doc in enumerate(doc_objects):
             doc.metadata['similarity_score'] = float(similarity_scores[i])
@@ -243,7 +238,7 @@ def responder(query: Query):
                 "url_pdf": doc.metadata.get("url_pdf", ""),
                 "temas": doc.metadata.get("temas", []),
                 "abstract": doc.metadata.get("abstract", "")
-            } for doc in docs
+            } for doc in doc_objects
         ]
         
         # Registrar los documentos consultados
@@ -262,6 +257,7 @@ def responder(query: Query):
     except Exception as e:
         print(f"[ERROR EN RAG]: {e}")
         raise HTTPException(status_code=500, detail="Ocurrió un error en el servidor.")
+
 
 # Nuevo endpoint para recomendaciones personalizadas
 @app.post("/recommendations")
