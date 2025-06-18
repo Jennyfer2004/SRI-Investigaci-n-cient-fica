@@ -1,9 +1,11 @@
 import streamlit as st
 import requests
-from googletrans import Translator
 import re 
+from deep_translator import GoogleTranslator
 
-traductor = Translator()
+traductor_es = GoogleTranslator(source='auto', target='es')
+traductor_en = GoogleTranslator(source='auto', target='en')
+
 
 st.title("Chatbot RAG de investigación científica con Streamlit")
 
@@ -24,7 +26,7 @@ def mostrar_recomendaciones():
     """
     Muestra recomendaciones de preguntas al usuario en formato de botones.
     """
-    st.write("**Recomendaciones personalizadas:**")
+    st.write("**Preguntas que le  pueden interesar:**")
     
     recomendaciones = obtener_recomendaciones(st.session_state.user_id)
     if not recomendaciones:
@@ -35,7 +37,11 @@ def mostrar_recomendaciones():
             "¿Qué investigaciones recientes existen sobre ética en IA?",
             "¿Cuáles son los papers más citados sobre redes neuronales convolucionales?"
         ]
-    recomendaciones=[traductor.translate(i, dest="es").text for i in recomendaciones]
+    else:
+        try:
+            recomendaciones = [traductor_es.translate(i) for i in recomendaciones]
+        except Exception as e:
+            recomendaciones = recomendaciones
 
     cols = st.columns(2)
     for i, pregunta in enumerate(recomendaciones[:4]):
@@ -91,12 +97,15 @@ for message in messages:
 
 # Obtener y mostrar recomendaciones personalizadas
 if True:
-    st.write("**Recomendaciones personalizadas:**")
+    st.write("**Preguntas que le  pueden interesar:**")
     
     recomendaciones = obtener_recomendaciones(st.session_state.user_id)
 
     if recomendaciones:
-        recomendaciones=[traductor.translate(i, dest="es").text for i in recomendaciones]
+        try:
+            recomendaciones = [traductor_es.translate(i) for i in recomendaciones]
+        except Exception as e:
+            recomendaciones = recomendaciones
 
     else:
         recomendaciones = [
@@ -124,7 +133,7 @@ if user_input:
     messages.append({"role": "user", "content": user_input})
     current_chat["show_recommendations"] = False
 
-    pregunta_en = traductor.translate(user_input, dest="en").text if user_input else ""
+    pregunta_en = traductor_en.translate(user_input) if user_input else ""
 
     try:
         response = requests.post(
@@ -144,7 +153,7 @@ if user_input:
         respuesta = f"⚠️ Error al conectar con el servidor: {e}"
         metadatos = []
         
-    respuesta_es = traductor.translate(respuesta, dest="es").text if not respuesta.startswith("⚠️") else respuesta
+    respuesta_es = traductor_es.translate(respuesta) if not respuesta.startswith("⚠️") else respuesta
 
     with st.chat_message("assistant"):
         st.markdown(respuesta_es)
@@ -157,13 +166,12 @@ if user_input:
                     st.write(f"**Autores:** {paper['autores']}")
                     st.write(f"**Publicado:** {paper['publicado']}")
                     st.write(f"**Idioma:** {paper['idioma']}")
-                    
                     st.markdown(f"**DOI:** [{paper['doi']}](https://doi.org/{paper['doi']})")
   
                     
-                    if paper['url_pdf']:
+                    if paper.get('url_pdf'):
                         st.markdown(f"[📄 Ver PDF]({paper['url_pdf']})")
-                    if paper['url_landing']:
+                    if paper.get('url_landing'):
                         st.markdown(f"[🌐 Página oficial]({paper['url_landing']})")
     messages.append({"role": "assistant", "content": respuesta_es})
 
