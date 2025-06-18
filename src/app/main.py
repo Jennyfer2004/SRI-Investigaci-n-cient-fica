@@ -390,44 +390,39 @@ def responder(query: Query):
     
 @app.post("/recommendations")
 def get_personalized_recommendations(request: RecommendationRequest):
+    """   
+    Genera recomendaciones personalizadas de preguntas basadas en el historial de interacciones 
+    Args:
+        request (RecommendationRequest): Objeto que contiene los datos de la solicitud, incluyendo el identificador del usuario.
+    Returns:
+        dict: Un diccionario con una lista de cadenas de texto representando las preguntas recomendadas para el usuario.    """
     try:
         user_db = load_user_db()
         user_data = user_db.get(request.user_id, {"interactions": [], "preferences": {}})
         
-        # Si no hay historial, devolver recomendaciones generales
         if not user_data["interactions"]:
             general_questions = [
                 "¿Qué papers recientes hay sobre inteligencia artificial en medicina?",
-                "¿Cuáles son los últimos avances en procesamiento de lenguaje natural?",
+                "¿Cómo se usan modelos de dinámica de fluidos computacional en diseño de prótesis?",
                 "¿Puedes recomendarme investigaciones sobre redes neuronales profundas?",
-                "¿Qué papers importantes existen sobre ética en IA?"
+                "¿Qué efectos tiene el cambio climático en la producción agrícola mundial?"
             ]
             return {"recommendations": general_questions}
         
-        # Extraer temas de interés del usuario
         last_questions = [interaction["question"] for interaction in user_data["interactions"][-5:]]
         viewed_dois = [doi for interaction in user_data["interactions"] for doi in interaction.get("sources", [])]
         
-        # Vectorizar preguntas para encontrar temas comunes
         vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 3))
         try:
             question_vectors = vectorizer.fit_transform(last_questions)
             feature_names = vectorizer.get_feature_names_out()
 
-            # Sumar los pesos de TF-IDF para cada término
             summed = np.asarray(question_vectors.sum(axis=0)).flatten()
 
-            # Filtrar solo trigramas (palabras separadas por dos espacios)
             trigram_indices = [i for i, term in enumerate(feature_names) if term.count(" ") == 2]
-
-            # Extraer trigramas y sus puntuaciones
             trigram_scores = [(feature_names[i], summed[i]) for i in trigram_indices]
-
-            # Ordenar por score descendente
             trigram_scores.sort(key=lambda x: x[1], reverse=True)
-
-            # Tomar el trigram más representativo (mayor score)
-            top_trigrams = [term for term, score in trigram_scores[:4]]  # puedes cambiar a [:3] si quieres más
+            top_trigrams = [term for term, score in trigram_scores[:4]] 
         except:
             top_trigrams = ["inteligencia artificial aplicada", "redes neuronales profundas", "procesamiento lenguaje natural"]
         
@@ -442,7 +437,6 @@ def get_personalized_recommendations(request: RecommendationRequest):
                 "¿Qué críticas han recibido estos enfoques?"
             ])
         
-        # Eliminar duplicados y limitar a 4 recomendaciones
         unique_recommendations = list(set(recommendations))[:4]
         
         return {"recommendations": unique_recommendations}
@@ -453,7 +447,7 @@ def get_personalized_recommendations(request: RecommendationRequest):
             "recommendations": [
                 "¿Qué papers recientes hay sobre inteligencia artificial?",
                 "¿Puedes recomendarme investigaciones similares a mis búsquedas anteriores?",
-                "¿Cuáles son los papers más citados en este área?",
+                "¿Qué efectos tiene el cambio climático en la producción agrícola mundial?",
                 "¿Qué enfoques alternativos existen para este problema?"
             ]
         }
