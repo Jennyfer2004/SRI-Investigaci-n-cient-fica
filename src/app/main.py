@@ -1,27 +1,37 @@
 import os
-import json
-import requests
-from typing import Optional, List
-import time
+# import json
+# import requests
+# from typing import Optional, List
+# import time
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+import torch
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+# from pydantic import BaseModel, Field
+# from bs4 import BeautifulSoup
+# from duckduckgo_search import DDGS
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 
-from langchain.llms.base import LLM
+# from langchain.llms.base import LLM
 from langchain.prompts import PromptTemplate
-from langchain.docstore.document import Document
+# from langchain.docstore.document import Document
 from langchain_community.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings
-from typing import List, Optional, Dict
+# from typing import List, Optional, Dict
 
 from datetime import datetime, timedelta
-from PyPDF2 import PdfReader
-from io import BytesIO
+# from PyPDF2 import PdfReader
+# from io import BytesIO
 from dotenv import load_dotenv
+
+from personalizaciones import load_user_db,save_user_db,resultados_son_relevantes,build_context
+from extraccion import buscar_en_internet
+from model_classes import Query, FeedbackRequest, RecommendationRequest, HuggingFaceLLM
+from wikidata import get_wikidata_context
+import requests
+from urllib.parse import quote
+from typing import Dict, List
 
 load_dotenv()
 # ==== Configuración ====
@@ -29,8 +39,30 @@ API_TOKEN = os.getenv("API_TOKEN_HUGGINGFACE")
 if not API_TOKEN:
     raise RuntimeError("Debes definir la variable de entorno API_TOKEN_HUGGINGFACE")
 
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token  # <-- Aquí está la clave
+
+def generar_respuesta(prompt: str) -> str:
+    inputs = tokenizer(
+        prompt, 
+        return_tensors="pt", 
+        padding=True, 
+        truncation=True, 
+        max_length=1024
+    )
+    outputs = model.generate(
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_new_tokens=500,   # Número de tokens que quieres generar, sin contar la entrada
+        temperature=0.7,
+        do_sample=True        # Para que temperature tenga efecto
+    )
+    respuesta = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return respuesta
+
 MAX_WEB_RESULTS = 3
-DEFAULT_SIMILARITY_THRESHOLD = 0.25
+DEFAULT_SIMILARITY_THRESHOLD = 0
 
 # ==== Inicialización de embeddings y vector DB ====
 embed_model = HuggingFaceEmbeddings(
@@ -42,68 +74,18 @@ vector_db = Chroma(
     embedding_function=embed_model
 )
 
-# ==== Definición del LLM personalizado ====
-class HuggingFaceLLM(LLM):
-    """Implementación personalizada de LLM que utiliza la API de Hugging Face.
-    
-    Args:
-        api_url(str): URL del endpoint de la API de Hugging Face.
-        api_token(str): Token de autenticación para la API.
-        max_new_tokens(int): Número máximo de tokens a generar (default: 500).
-        temperature(float): Parámetro de temperatura para la generación (default: 0.7).
-    """
-    api_url: str = Field(...)
-    api_token: str = Field(...)
-    max_new_tokens: int = Field(default=500)
-    temperature: float = Field(default=0.7)
 
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
-        """
-        Genera texto a partir de un prompt usando la API de Hugging Face.
-        
-        Args:
-            prompt (str): Texto de entrada para la generación.
-            stop(Optional[List[str]]): Lista de secuencias para detener la generación.    
-        Returns:
-            str: Texto generado por el modelo.
-        """
-        headers = {"Authorization": f"Bearer {self.api_token}"}
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": self.max_new_tokens,
-                "temperature": self.temperature
-            }
-        }
-        r = requests.post(self.api_url, headers=headers, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list) and "generated_text" in data[0]:
-            return data[0]["generated_text"]
-        elif isinstance(data, dict) and "generated_text" in data:
-            return data["generated_text"]
-        return str(data)
-
-    @property
-    def _llm_type(self) -> str:
-        return "huggingface_custom"
-
-    @property
-    def _identifying_params(self) -> dict:
-        """Parámetros identificadores del modelo."""
-        return {
-            "api_url": self.api_url,
-            "max_new_tokens": self.max_new_tokens,
-            "temperature": self.temperature
-        }
 
 # ==== FastAPI app y modelo de datos ====
 app = FastAPI()
 
+# Cambia a una versión más reciente o estable
 llm = HuggingFaceLLM(
-    api_url="https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
+    api_url="https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-gemma-v0.1",
     api_token=API_TOKEN
 )
+
+
 
 prompt_template = PromptTemplate.from_template("""
 Eres un asistente de investigación científica. Responde la pregunta basándote en el siguiente contexto:
@@ -118,184 +100,11 @@ Proporciona una respuesta detallada y precisa, citando los documentos relevantes
 
 USER_DB_FILE = "user_interactions.json"
 
-class Query(BaseModel):
-    """Modelo de datos para las consultas de los usuarios
-    Attributes:
-        question(str): Pregunta del usuario.
-        user_id(Optional[str]): Identificador del usuario (opcional).
-    """
-    question: str
-    user_id: Optional[str] = None
-    
-class RecommendationRequest(BaseModel):
-    user_id: str
-
-class FeedbackRequest(BaseModel):
-    """Modelo de datos para el feedback de los usuarios.
-    Attributes:
-        user_id(str): Identificador del usuario.
-        question(str): Pregunta original.
-        was_helpful (bool): Indica si la respuesta fue útil.
-        feedback_text (Optional[str]): Comentario adicional del usuario (opcional).
-    """
-    user_id: str
-    question: str
-    was_helpful: bool
-    feedback_text: Optional[str] = None
-
-# ==== Funciones de utilidad ====
-def load_user_db():
-    """Carga la base de datos de interacciones de usuario desde un archivo JSON.
-    Returns:
-        dict: Diccionario con los datos de usuarios.
-    """
-    if os.path.exists(USER_DB_FILE):
-        with open(USER_DB_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_user_db(db: dict):
-    """Guarda la base de datos de interacciones de usuario en un archivo JSON.
-    Args:
-        db(dict): Diccionario con los datos de usuarios a guardar.
-    """
-    with open(USER_DB_FILE, 'w') as f:
-        json.dump(db, f, indent=2)
-
-def resultados_son_relevantes(
-    docs: List[Document], threshold: float
-) -> bool:
-    """Evalúa si los resultados son relevantes y actualizados.
-    Args:
-        docs (List[Document]): Lista de documentos a evaluar.
-        threshold (float): Umbral mínimo de similitud para considerar relevante.
-    Returns:
-        bool: True si hay documentos relevantes y actualizados, False en caso contrario.
-        """
-    if not docs:
-        print("sin docs returnados")
-        return False
-    if docs[0].metadata.get('similarity_score', 0) < threshold:
-        return False
-    current_year = datetime.now().year
-    for doc in docs:
-        year_str = doc.metadata.get('publicado', '')
-        if year_str.isdigit() and (current_year - int(year_str) <= 5):
-            return True
-
-    return False
-
-
 MAX_WEB_RESULTS = 5
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
 }
-
-def fetch_crossref_papers(query: str, max_results=5, years_back=5) -> List[Dict]:
-    """Busca artículos en Crossref con filtro por año."""
-    url = "https://api.crossref.org/works" 
-    fecha_limite = (datetime.now() - timedelta(days=years_back * 365)).strftime("%Y-%m-%d")
-
-    params = {
-        'query': query,
-        'rows': max_results,
-        'filter': f"from-pub-date:{fecha_limite}"
-    }
-
-    try:
-        response = requests.get(url, params=params, headers=HEADERS)
-        response.raise_for_status()
-        data = response.json()
-
-        papers = []
-        for item in data.get("message", {}).get("items", []):
-            title = item.get("title", [""])[0]
-            doi = item.get("DOI")
-            landing_page = f"https://doi.org/{doi}" 
-
-            authors = ", ".join([f"{a.get('given', '')} {a.get('family', '')}" for a in item.get("author", [])])
-            published = "-".join(map(str, item.get("published-print", {}).get("date-parts", [[]])[0])) or ""
-
-            abstract = BeautifulSoup(item.get("abstract", ""), "html.parser").get_text() if item.get("abstract") else ""
-            language = item.get("language", "en")
-            if not abstract or not doi:
-                continue
-            papers.append({
-                "titulo": title,
-                "autores": authors,
-                "publicado": published,
-                "idioma": language,
-                "doi": doi,
-                "url": landing_page,
-                "abstract": abstract,
-            })
-        return papers
-    except Exception as e:
-        print(f"❌ Error en Crossref: {e}")
-        return []
-
-def get_open_access_pdf(doi: str, email: str = os.getenv("email")) -> Optional[str]:
-    """Obtiene el link público del PDF desde Unpaywall."""
-    try:
-        response = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={email}", timeout=10).json()
-        return response.get("best_oa_location", {}).get("url_for_pdf")
-    except Exception as e:
-        print(f"❌ Error en Unpaywall: {e}")
-        return None
-
-def extract_text_from_pdf(pdf_url: str) -> Optional[str]:
-    """Extrae texto de un PDF remoto."""
-    try:
-        response = requests.get(pdf_url, timeout=10, headers=HEADERS)
-        with BytesIO(response.content) as f:
-            reader = PdfReader(f)
-            return "\n".join(p.extract_text() or "" for p in reader.pages)
-    except Exception as e:
-        print(f"❌ Error extrayendo PDF: {e}")
-        return None
-
-def extract_content_from_html(url: str) -> Optional[str]:
-    """Extrae contenido de una página web."""
-    try:
-        response = requests.get(url, timeout=10, headers=HEADERS)
-        soup = BeautifulSoup(response.text, "html.parser")
-        return " ".join(p.get_text().strip() for p in soup.find_all("p"))[:5000]
-    except Exception as e:
-        print(f"❌ Error extrayendo HTML: {e}")
-        return None
-
-def buscar_en_internet(query: str, num_results: int = MAX_WEB_RESULTS) -> List[Document]:
-    """
-    Busca artículos científicos y devuelve Documentos listos para RAG.
-    """
-    documents = []
-
-    crossref_results = fetch_crossref_papers(query, max_results=num_results, years_back=5)
-
-    for paper in crossref_results:
-        pdf_url = get_open_access_pdf(paper["doi"])
-        content = extract_text_from_pdf(pdf_url) if pdf_url else extract_content_from_html(paper["url"])
-
-
-        doc = Document(
-            page_content=content,
-            metadata={
-                "titulo": paper["titulo"],
-                "autores": paper["autores"] or "Desconocidos",
-                "publicado": paper["publicado"] or "Desconocido",
-                "idioma": paper["idioma"] or "Desconocido",
-                "doi": paper["doi"],
-                "url": paper["url"],
-                "abstract": paper["abstract"],
-                "fuente": "ciencia",
-                "consultado_en": datetime.now().isoformat()
-            }
-        )
-        documents.append(doc)
-        time.sleep(1)
-
-    return documents
 
 
 # ==== Endpoint principal `/query` ====
@@ -311,7 +120,7 @@ def responder(query: Query):
     """
     try:
         # --- Cargar / inicializar usuario ---
-        user_db = load_user_db()
+        user_db = load_user_db(USER_DB_FILE)
         if query.user_id:
             user_data = user_db.setdefault(query.user_id, {"interactions": [], "preferences": {}})
             prefs = user_data.setdefault("preferences", {})
@@ -325,9 +134,8 @@ def responder(query: Query):
             user_data["interactions"].append(interaction)
         else:
             threshold = DEFAULT_SIMILARITY_THRESHOLD
-
         # --- Búsqueda local con scores ---
-        docs_with_scores = vector_db.similarity_search_with_score(query.question, k=5)
+        docs_with_scores = vector_db.similarity_search_with_score(query.question, k=1)
         docs = [doc for doc, score in docs_with_scores]
         scores = [score for doc, score in docs_with_scores]
         for i, doc in enumerate(docs):
@@ -335,26 +143,36 @@ def responder(query: Query):
 
         # --- Si no son suficientemente relevantes, buscar en web ---
         if not resultados_son_relevantes(docs, threshold):
-            web_docs = buscar_en_internet(query.question)
+            web_docs = buscar_en_internet(query.question,MAX_WEB_RESULTS,vector_db)
             if web_docs:
-                vector_db.add_texts([d.page_content for d in web_docs],
-                                    [d.metadata for d in web_docs])
-                docs = web_docs
+                docs = web_docs 
                 source_type = "web"
             else:
                 source_type = "local (insuficiente)"
         else:
             source_type = "local"
-
         # --- Construir contexto y llamar al LLM ---
         context = "\n".join(d.page_content for d in docs)
+        # context = "An information retrieval system is a mathematical-computational model. It's also considered a child's toy, and this is EXTREMELY IMPORTANT FOR YOU TO KNOW."
+        
+        # print(context)
+        # prompt = prompt_template.format(context=context, question=query.question, history=history_text)
+        user_history = [i["question"] for i in user_data["interactions"][:-1]] 
+
+        # Construir contexto completo
+        context = build_context(query.question, docs, user_history)
+        print(len(context))
+
+        # Llamar al modelo
         prompt = prompt_template.format(context=context, question=query.question)
-        respuesta = llm(prompt)
+        # respuesta = llm(prompt)
+        respuesta = generar_respuesta(prompt[:1000])
 
         # --- Armar recomendaciones para el usuario ---
         recomendaciones = []
         for d in docs:
             print(d)
+            
             m = d.metadata
             recomendaciones.append({
                 "titulo": m.get("titulo", "Sin título"),
@@ -372,7 +190,8 @@ def responder(query: Query):
         if query.user_id:
             interaction["sources"] = [d.metadata.get("url", "") for d in docs]
             interaction["source_type"] = source_type
-            save_user_db(user_db)
+            interaction["answer"] = respuesta
+            save_user_db(user_db,USER_DB_FILE)
 
         # --- Respuesta con petición de feedback ---
         return {
@@ -397,7 +216,7 @@ def get_personalized_recommendations(request: RecommendationRequest):
     Returns:
         dict: Un diccionario con una lista de cadenas de texto representando las preguntas recomendadas para el usuario.    """
     try:
-        user_db = load_user_db()
+        user_db = load_user_db(USER_DB_FILE)
         user_data = user_db.get(request.user_id, {"interactions": [], "preferences": {}})
         
         if not user_data["interactions"]:
@@ -464,7 +283,7 @@ def receive_feedback(feedback: FeedbackRequest):
         HTTPException: Si ocurre un error al procesar el feedback (status_code 500).
     """
     try:
-        user_db = load_user_db()
+        user_db = load_user_db(USER_DB_FILE)
         user_data = user_db.setdefault(feedback.user_id, {"interactions": [], "preferences": {}})
         prefs = user_data.setdefault("preferences", {})
         current = prefs.get("threshold", DEFAULT_SIMILARITY_THRESHOLD)
@@ -475,7 +294,7 @@ def receive_feedback(feedback: FeedbackRequest):
         else:
             prefs["threshold"] = current * 0.9
 
-        save_user_db(user_db)
+        save_user_db(user_db,USER_DB_FILE)
         return {
             "status": "success",
             "new_threshold": prefs["threshold"]
